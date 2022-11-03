@@ -20,7 +20,8 @@ EnableTraceOutput = true;
 
 // The name of your ODBC driver.
 //
-Config_DriverName = "SQL Server Native Client 11.0";
+//Config_DriverName = "SQL Server Native Client 11.0";
+Config_DriverName = "Firebird/InterBase(r) driver";
 
 // If your driver under-reports its SQL conformance level because it does not
 // support the full range of CRUD operations, but does support the ANSI SQL required
@@ -78,7 +79,20 @@ Config_SqlConformance = ODBC[SQL_SC][SQL_SC_SQL92_FULL];  // null, 1, 2, 4, 8
 // OFFSET 200 ROWS
 // FETCH FIRST 100 ROWS ONLY
 //
-Config_LimitClauseKind = LimitClauseKind.Top; // see above
+Config_LimitClauseKind = LimitClauseKind.None; // see above
+
+// Set this option to configure a custom limit clause. Config_LimitClauseKind should
+// be set to LimitClauseKind.None in this case.
+Config_LimitClause =
+    (skip, take) =>
+        let
+            limit = if (take <> null) then Text.Format("FIRST #{0}", {take}) else "",
+            offset = if (skip > 0) then Text.Format("SKIP #{0}", {skip}) else ""
+        in
+            [
+                Text = Text.Format("#{0} #{1}", {limit, offset}),
+                Location = "AfterSelectBeforeModifiers"
+            ];
 
 // Set this option to true if your ODBC supports the standard username/password 
 // handling through the UID and PWD connection string parameters. If the user 
@@ -150,6 +164,7 @@ shared SqlODBC.Contents = (server as text, optional options as record) =>
             // names might be different for your data source.
             Server = server,
             ApplicationIntent = "ReadOnly",
+            database = server,
 
             // These fields come from the options record, so they might be null.
             // A later step will strip all null values from the connection string.
@@ -179,6 +194,8 @@ shared SqlODBC.Contents = (server as text, optional options as record) =>
         // Configuration options for the call to Odbc.DataSource
         //
         defaultConfig = Diagnostics.LogValue("BuildOdbcConfig", BuildOdbcConfig()),
+
+        AstVisitor = Diagnostics.LogValue("AstVisitor_Options", defaultConfig[AstVisitor]),
 
         SqlCapabilities = Diagnostics.LogValue("SqlCapabilities_Options", defaultConfig[SqlCapabilities] & [
             // Place custom overrides here
@@ -258,6 +275,7 @@ shared SqlODBC.Contents = (server as text, optional options as record) =>
 
             // These values should be set by previous steps
             CredentialConnectionString = CredentialConnectionString,
+            AstVisitor = AstVisitor,
             SqlCapabilities = SqlCapabilities,
             SQLColumns = SQLColumns,
             SQLGetInfo = SQLGetInfo,
@@ -310,19 +328,32 @@ SqlODBC.Icons = [
 // build settings based on configuration variables
 BuildOdbcConfig = () as record =>
     let
-        Merge = (previous as record, optional caps as record, optional funcs as record, optional getInfo as record) as record => 
+        Merge = (previous as record, optional ast as record, optional caps as record, optional funcs as record, optional getInfo as record) as record => 
             let
+                newAst = if (ast <> null) then previous[AstVisitor] & ast else previous[AstVisitor],
                 newCaps = if (caps <> null) then previous[SqlCapabilities] & caps else previous[SqlCapabilities],
                 newFuncs = if (funcs <> null) then previous[SQLGetFunctions] & funcs else previous[SQLGetFunctions],
                 newGetInfo = if (getInfo <> null) then previous[SQLGetInfo] & getInfo else previous[SQLGetInfo]
             in
-                [ SqlCapabilities = newCaps, SQLGetFunctions = newFuncs, SQLGetInfo = newGetInfo ],
+                [ AstVisitor = newAst, SqlCapabilities = newCaps, SQLGetFunctions = newFuncs, SQLGetInfo = newGetInfo ],
 
         defaultConfig = [
+            AstVisitor = [],
             SqlCapabilities = [],
             SQLGetFunctions = [],
             SQLGetInfo = []
         ],
+
+        withAstVisitor =
+            if (Config_LimitClause <> null) then
+                let
+                    ast = [
+                        LimitClause = Config_LimitClause
+                    ]
+                in
+                    Merge(defaultConfig, ast)
+            else
+                defaultConfig,
 
         withParams =
             if (Config_UseParameterBindings = false) then
@@ -338,9 +369,9 @@ BuildOdbcConfig = () as record =>
                         SQL_API_SQLBINDPARAMETER = false
                     ]
                 in
-                    Merge(defaultConfig, caps, funcs)
+                    Merge(withAstVisitor, caps, funcs)
             else
-                defaultConfig,
+                withAstVisitor,
                 
         withEscape = 
             if (Config_StringLiterateEscapeCharacters <> null) then 
